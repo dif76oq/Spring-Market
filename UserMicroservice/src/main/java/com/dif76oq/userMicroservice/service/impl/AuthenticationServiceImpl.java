@@ -6,8 +6,11 @@ import com.dif76oq.userMicroservice.dto.ResendUserDto;
 import com.dif76oq.userMicroservice.dto.VerifyUserDto;
 import com.dif76oq.userMicroservice.model.User;
 import com.dif76oq.userMicroservice.repository.UserRepository;
-import jakarta.mail.MessagingException;
 import lombok.AllArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.SendResult;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -16,6 +19,7 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.util.Optional;
 import java.util.Random;
+import java.util.concurrent.CompletableFuture;
 
 @Service
 @AllArgsConstructor
@@ -23,7 +27,9 @@ public class AuthenticationServiceImpl {
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
     private final AuthenticationManager authenticationManager;
-    private final EmailServiceImpl emailService;
+
+    private final KafkaTemplate<Integer, Integer> kafkaTemplate;
+    private final Logger LOGGER = LoggerFactory.getLogger(this.getClass());
 
     public User signup(RegisterUserDto input) {
         Optional<User> optionalUser = userRepository.findByEmail(input.getEmail());
@@ -37,9 +43,22 @@ public class AuthenticationServiceImpl {
         User user = new User(input.getUsername(), input.getEmail(), passwordEncoder.encode(input.getPassword()));
         user.setVerificationCode(generateVerificationCode());
         user.setVerificationCodeExpiresAt(LocalDateTime.now().plusMinutes(10));
-        user.setEnabled(false);
-        sendVerificationEmail(user);
-        return userRepository.save(user);
+        user.setEnabled(false);;
+        User savedUser = userRepository.save(user);
+
+        CompletableFuture<SendResult<Integer, Integer>> future = kafkaTemplate
+                .send("user-registered-events-topic", savedUser.getId(), savedUser.getId());
+        future.whenComplete((result, exception) -> {
+            if (exception != null) {
+                LOGGER.error("failed to send message: {}", exception.getMessage());
+            } else {
+                LOGGER.info("Message successfully sent: {}", result.getRecordMetadata());
+            }
+        });
+
+        future.join();
+
+        return savedUser;
     }
 
     public User authenticate(LoginUserDto input) {
@@ -86,31 +105,21 @@ public class AuthenticationServiceImpl {
             }
             user.setVerificationCode(generateVerificationCode());
             user.setVerificationCodeExpiresAt(LocalDateTime.now().plusMinutes(60));
-            sendVerificationEmail(user);
-            userRepository.save(user);
+            User savedUser = userRepository.save(user);
+
+            CompletableFuture<SendResult<Integer, Integer>> future = kafkaTemplate
+                    .send("user-registered-events-topic", savedUser.getId(), savedUser.getId());
+            future.whenComplete((result, exception) -> {
+                if (exception != null) {
+                    LOGGER.error("failed to send message \"resending\": {}", exception.getMessage());
+                } else {
+                    LOGGER.info("Message \"resending\" successfully sent: {}", result.getRecordMetadata());
+                }
+            });
+
+            future.join();
         } else {
             throw new RuntimeException("User not found");
-        }
-    }
-    public void sendVerificationEmail(User user) {
-        String subject = "Account verification";
-        String verificationCode = user.getVerificationCode();
-        String htmlMessage = "<html>"
-                + "<body style=\"font-family: Arial, sans-serif;\">"
-                + "<div style=\"background-color: #f5f5f5; padding: 20px;\">"
-                + "<h2 style=\"color: #333;\">Welcome to our app!</h2>"
-                + "<p style=\"font-size: 16px;\">Please enter the verification code below to continue:</p>"
-                + "<div style=\"background-color: #fff; padding: 20px; border-radius: 5px; box-shadow: 0 0 10px rgba(0,0,0,0.1);\">"
-                + "<h3 style=\"color: #333;\">Verification Code:</h3>"
-                + "<p style=\"font-size: 18px; font-weight: bold; color: #007bff;\">" + verificationCode + "</p>"
-                + "</div>"
-                + "</div>"
-                + "</body>"
-                + "</html>";
-        try {
-            emailService.sendVerificationEmail(user.getEmail(), subject, htmlMessage);
-        } catch (MessagingException e) {
-            e.printStackTrace();
         }
     }
 

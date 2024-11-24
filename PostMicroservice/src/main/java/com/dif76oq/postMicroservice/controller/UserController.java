@@ -15,6 +15,8 @@ public class UserController {
 
     private final UserService service;
 
+
+    //TODO ВЫНЕСТИ В ФИЛЬТРЫ
     @GetMapping("/{id}/posts")
     public List<Post> findPostsByUserId(@PathVariable int id) {
 
